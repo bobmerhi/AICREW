@@ -1,7 +1,5 @@
 import io
-import json
 import os
-import uuid
 from typing import List, Dict, Any
 
 import streamlit as st
@@ -12,22 +10,22 @@ from openai import OpenAI
 # --------------------------------------------------------------------------- #
 PROVIDERS = {
     "NVIDIA NIM": {
-        "base_url": "https://integrate.api.nvidia.com/v1",
+        "base_url": "https://nvidia.com",
         "secret": "NVIDIA_API_KEY",
         "default_model": "deepseek-ai/deepseek-v4.1-flash",
     },
     "Groq": {
-        "base_url": "https://api.groq.com/openai/v1",
+        "base_url": "https://groq.com",
         "secret": "GROQ_API_KEY",
         "default_model": "llama-3.3-70b-versatile",
     },
     "OpenRouter": {
-        "base_url": "https://openrouter.ai/api/v1",
+        "base_url": "https://openrouter.ai",
         "secret": "OPENROUTER_API_KEY",
         "default_model": "meta-llama/llama-3.3-70b-instruct:free",
     },
     "Google AI Studio": {
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "base_url": "https://googleapis.com",
         "secret": "GEMINI_API_KEY",
         "default_model": "gemini-3.5-flash-lite",
     },
@@ -193,7 +191,7 @@ if "file_context" not in st.session_state:
     st.session_state.file_context = ""
 
 # --------------------------------------------------------------------------- #
-# 4. Sidebar – API Keys, Live Model Picker, & Agent Roster
+# 4. Sidebar – API Keys & Live Model Picker
 # --------------------------------------------------------------------------- #
 with st.sidebar:
     st.title("🧑‍🚀 AI Crew Portal")
@@ -252,10 +250,12 @@ with st.sidebar:
 # Pick best available active provider for each role
 active_providers = [p for p in PROVIDERS if get_key(p)]
 
+
 def pick_provider(preferred: str) -> str:
     if preferred in active_providers:
         return preferred
     return active_providers[0] if active_providers else preferred
+
 
 # Build dynamic agent definitions using live selected models
 AGENTS = {
@@ -279,3 +279,4 @@ AGENTS = {
     },
     "reviewer": {
         "name": "✅ Quality Reviewer",
+        "provider": pick_provider("OpenRouter"),
