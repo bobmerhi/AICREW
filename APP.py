@@ -1,58 +1,40 @@
-# app.py
-"""
-AI Crew – Enhanced UI & Audio Support
-
-Features
---------
-* Live‑fetch of available models (“modules”) from Groq, NVIDIA NIM, OpenRouter, Google AI Studio.
-* Automatic fallback to a compatible model when the selected one is unavailable.
-* File uploader (any type) + voice‑note recorder (via streamlit‑webrtc).
-* Whisper‑style speech‑to‑text using Groq’s audio endpoint.
-* All existing crew functionality (Manager, Researcher, Coder, Builder, Reviewer) retained.
-"""
-
+import io
 import json
 import os
 import uuid
-import time
 from typing import List, Dict, Any
 
 import streamlit as st
 from openai import OpenAI
 
 # --------------------------------------------------------------------------- #
-# 1️⃣ Provider definitions
+# 1. Provider definitions
 # --------------------------------------------------------------------------- #
 PROVIDERS = {
     "NVIDIA NIM": {
         "base_url": "https://integrate.api.nvidia.com/v1",
         "secret": "NVIDIA_API_KEY",
-        "default_model": "meta/llama-3.3-70b-instruct",
-        "model_list_endpoint": "/models",  # NVIDIA uses standard OpenAI /v1/models
+        "default_model": "deepseek-ai/deepseek-v4.1-flash",
     },
     "Groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "secret": "GROQ_API_KEY",
-        "default_model": "qwen/qwen3.8-27b",
-        "model_list_endpoint": "/models",
-        "audio_endpoint": "/audio/transcriptions",  # Whisper‑style endpoint
+        "default_model": "llama-3.3-70b-versatile",
     },
     "OpenRouter": {
         "base_url": "https://openrouter.ai/api/v1",
         "secret": "OPENROUTER_API_KEY",
         "default_model": "meta-llama/llama-3.3-70b-instruct:free",
-        "model_list_endpoint": "/models",
     },
     "Google AI Studio": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "secret": "GOOGLE_API_KEY",
-        "default_model": "gemini-2.5-flash",
-        "model_list_endpoint": "/models",
+        "secret": "GEMINI_API_KEY",
+        "default_model": "gemini-3.5-flash-lite",
     },
 }
 
 # --------------------------------------------------------------------------- #
-# 2️⃣ Helper utilities
+# 2. Helper utilities
 # --------------------------------------------------------------------------- #
 def get_key(provider: str) -> str:
     """Return API key with priority: sidebar > Streamlit secrets > env."""
@@ -60,224 +42,240 @@ def get_key(provider: str) -> str:
     if typed:
         return typed
     secret_name = PROVIDERS[provider]["secret"]
-    # Google also accepts GEMINI_API_KEY alias
-    if provider == "Google AI Studio":
-        secret_name = "GEMINI_API_KEY"
-    # Streamlit secrets
-    if secret_name in st.secrets:
-        return str(st.secrets[secret_name]).strip()
-    # Environment
+    try:
+        if secret_name in st.secrets:
+            return str(st.secrets[secret_name]).strip()
+    except Exception:
+        pass
     return os.getenv(secret_name, "").strip()
 
 
-@st.cache_data(ttl=3600)  # cache for 1 hour to respect rate limits
-def fetch_model_catalog() -> Dict[str, List[Dict[str, Any]]]:
-    """Query every provider for its list of models and store the raw JSON."""
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_model_catalog(api_keys_snapshot: tuple) -> Dict[str, List[Dict[str, Any]]]:
+    """Query every configured provider for its live list of models."""
     catalog = {}
+    keys_map = dict(api_keys_snapshot)
     for prov, cfg in PROVIDERS.items():
-        key = get_key(prov)
+        key = keys_map.get(prov, "")
         if not key:
-            catalog[prov] = []  # no key → empty list (will be shown as unavailable)
+            catalog[prov] = []
             continue
         try:
-            client = OpenAI(
-                api_key=key,
-                base_url=cfg["base_url"],
-                timeout=30,
-            )
-            resp = client.models.list()  # works for all OpenAI‑compatible endpoints
-            catalog[prov] = [m.model_dump() for m in resp.data]  # list of dicts
-        except Exception as e:
-            st.warning(f"❗ Could not fetch models from **{prov}**: {e}")
+            client = OpenAI(api_key=key, base_url=cfg["base_url"], timeout=20)
+            resp = client.models.list()
+            models = [m.model_dump() for m in resp.data]
+            if prov == "OpenRouter":
+                models = [m for m in models if ":free" in m["id"]]
+            catalog[prov] = sorted(models, key=lambda x: x["id"])
+        except Exception:
             catalog[prov] = []
     return catalog
 
 
-def resolve_model(
-    provider: str,
-    capability: str,
-    fallback_list: List[str] | None = None,
-) -> str:
-    """
-    Return the best available model ID for *provider* that satisfies *capability*.
-    *capability* can be "chat" or "audio".  If the currently selected model is
-    unavailable, iterate through *fallback_list* (or a built‑in priority list)
-    until a working model is found.
-    """
+def resolve_model(provider: str, fallback_list: List[str] | None = None) -> str:
+    """Pick the selected or best available chat model for a provider."""
     catalog = st.session_state.get("model_catalog", {})
     available = catalog.get(provider, [])
 
-    # Helper to decide if a model supports the needed capability
-    def supports(model: Dict[str, Any]) -> bool:
-        # Very simple heuristic: look for keywords in the model ID
-        mid = model["id"].lower()
-        if capability == "audio":
-            return "whisper" in mid or "speech" in mid
-        # default: chat/completion capability
-        return any(tok in mid for tok in ["gpt", "llama", "mixtral", "gemini", "qwen", "claude"])
+    def is_chat_model(mid: str) -> bool:
+        low = mid.lower()
+        blocked = ["whisper", "embed", "tts", "guard", "vision-preview", "image", "audio"]
+        if any(b in low for b in blocked):
+            return False
+        tokens = ["gpt", "llama", "mixtral", "gemini", "qwen", "deepseek", "nemotron", "mistral"]
+        return any(t in low for t in tokens)
 
-    # 1️⃣ Try the currently configured model (if any)
     current = st.session_state.get(f"selected_model_{provider}")
-    if current:
-        if any(m["id"] == current for m in available):
-            if any(supports(m) for m in available if m["id"] == current):
-                return current
+    if current and current != "<none>":
+        return current
 
-    # 2️⃣ Scan the provider catalog for the first matching model
-    for m in available:
-        if supports(m):
-            return m["id"]
-
-    # 3️⃣ Use fallback list (ordered by preference)
-    fallback = fallback_list or []
-    for fid in fallback:
+    for fid in (fallback_list or []):
         if any(m["id"] == fid for m in available):
             return fid
 
-    # 4️⃣ As a last resort, return the provider’s default model (may be unavailable)
+    for m in available:
+        if is_chat_model(m["id"]):
+            return m["id"]
+
     return PROVIDERS[provider]["default_model"]
 
 
+def free_web_search(query: str) -> str:
+    """Live DuckDuckGo search skill for the Researcher agent."""
+    try:
+        from ddgs import DDGS
+        results = DDGS().text(query, max_results=5)
+        if not results:
+            return "No search results found."
+        return "\n".join([f"- {r['title']}: {r['body']} ({r['href']})" for r in results])
+    except Exception as e:
+        return f"Web search skipped ({e}). Relying on model knowledge."
+
+
 def stream_completion(agent: dict, messages: List[dict], placeholder) -> str:
-    """Stream a chat completion into `placeholder` and return the full text."""
+    """Stream a chat completion into `placeholder` with automatic fallback."""
     provider = agent["provider"]
     key = get_key(provider)
     if not key:
-        raise ValueError(f"No API key for {provider}. Add it in the sidebar or Streamlit secrets.")
-    headers = {"X-Title": "AI Crew"} if provider == "OpenRouter" else None
+        raise ValueError(f"No API key for {provider}. Add it in the sidebar or Secrets.")
+
+    headers = {"X-Title": "AI Crew Portal"} if provider == "OpenRouter" else None
     client = OpenAI(
         api_key=key,
         base_url=PROVIDERS[provider]["base_url"],
         timeout=120,
         default_headers=headers,
     )
-    stream = client.chat.completions.create(
-        model=agent["model"],
-        messages=messages,
-        temperature=agent.get("temperature", 0.4),
-        stream=True,
-    )
-    text = ""
-    for chunk in stream:
-        if not chunk.choices:
+
+    models_to_try = [agent["model"], PROVIDERS[provider]["default_model"]]
+    last_err = None
+
+    for model_id in dict.fromkeys(models_to_try):
+        try:
+            stream = client.chat.completions.create(
+                model=model_id,
+                messages=messages,
+                temperature=agent.get("temperature", 0.4),
+                stream=True,
+            )
+            text = ""
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    text += delta
+                    placeholder.markdown(text + "▌")
+            placeholder.markdown(text)
+            return text
+        except Exception as e:
+            last_err = e
             continue
-        delta = chunk.choices[0].delta.content or ""
-        if delta:
-            text += delta
-            placeholder.markdown(text + "▌")
-    placeholder.markdown(text)
-    return text
+
+    raise RuntimeError(f"{provider} failed: {last_err}")
 
 
-def transcribe_audio(file_bytes: bytes, mime: str) -> str:
+def transcribe_audio(file_bytes: bytes, filename: str = "voice.wav") -> str:
     """Send audio bytes to Groq Whisper endpoint and return the transcript."""
-    provider = "Groq"
-    key = get_key(provider)
+    key = get_key("Groq")
     if not key:
-        raise ValueError("Groq API key required for audio transcription.")
+        raise ValueError("Groq API key required for voice transcription. Paste it in the sidebar!")
     client = OpenAI(
         api_key=key,
-        base_url=PROVIDERS[provider]["base_url"],
-        timeout=120,
+        base_url=PROVIDERS["Groq"]["base_url"],
+        timeout=60,
     )
-    # Groq expects multipart/form-data with fields: file, model, language (optional)
-    # We'll use the generic `audio.transcriptions` endpoint.
+    audio_file = io.BytesIO(file_bytes)
+    audio_file.name = filename
     resp = client.audio.transcriptions.create(
-        model="whisper-large-v3",  # Groq’s Whisper model (adjust if needed)
-        file=("audio", file_bytes, mime),
+        model="whisper-large-v3-turbo",
+        file=audio_file,
     )
     return resp.text
 
 
-def clip(text: str, limit: int = 6000) -> str:
+def clip(text: str, limit: int = 8000) -> str:
     return text if len(text) <= limit else text[:limit] + "\n…[truncated]"
 
 
-def enabled_agents():
-    return [a for a in st.session_state.agents if a["enabled"]]
+# --------------------------------------------------------------------------- #
+# 3. Streamlit UI – Page Config & Session State
+# --------------------------------------------------------------------------- #
+st.set_page_config(page_title="AI Crew – Enhanced Portal", page_icon="🧑‍🚀", layout="wide")
 
-
-def agent_by_id(agent_id):
-    return next((a for a in st.session_state.agents if a["id"] == agent_id), None)
-
+if "api_keys" not in st.session_state:
+    st.session_state.api_keys = {}
+if "model_catalog" not in st.session_state:
+    st.session_state.model_catalog = {}
+if "conversation" not in st.session_state:
+    st.session_state.conversation = []
+if "file_context" not in st.session_state:
+    st.session_state.file_context = ""
 
 # --------------------------------------------------------------------------- #
-# 3️⃣ Streamlit UI – Sidebar (API keys + Dynamic Model Picker)
+# 4. Sidebar – API Keys, Live Model Picker, & Agent Roster
 # --------------------------------------------------------------------------- #
-st.set_page_config(page_title="AI Crew – Enhanced", page_icon="🧑‍🚀", layout="wide")
-
 with st.sidebar:
-    st.title("🧑‍🚀 AI Crew")
-    st.subheader("🔑 API keys")
+    st.title("🧑‍🚀 AI Crew Portal")
+    st.subheader("🔑 API Keys ($0.00 Tiers)")
     for prov in PROVIDERS:
-        typed = st.text_input(prov, type="password", key=f"key_{prov}", placeholder="paste key (session only)")
+        typed = st.text_input(
+            prov,
+            type="password",
+            key=f"key_{prov}",
+            placeholder="Loaded from Secrets or paste here",
+        )
         st.session_state.api_keys[prov] = typed
-        st.caption("✅ key found" if get_key(prov) else "⚠️ no key")
+        st.caption("✅ Ready" if get_key(prov) else "⚠️ Missing key")
 
     st.divider()
-    st.subheader("📦 Model picker (live)")
-    # Load (or reload) the model catalog
-    if st.button("Refresh model list"):
-        st.session_state.model_catalog = fetch_model_catalog()
-        st.rerun()
-    if "model_catalog" not in st.session_state:
-        st.session_state.model_catalog = fetch_model_catalog()
+    st.subheader("📦 Live Model Picker")
+    keys_snapshot = tuple((p, get_key(p)) for p in PROVIDERS)
 
-    # Show a multiselect per provider with status badges
+    if st.button("🔄 Refresh Model Lists"):
+        fetch_model_catalog.clear()
+        st.session_state.model_catalog = fetch_model_catalog(keys_snapshot)
+        st.rerun()
+
+    if not st.session_state.model_catalog:
+        st.session_state.model_catalog = fetch_model_catalog(keys_snapshot)
+
     for prov, cfg in PROVIDERS.items():
         models = st.session_state.model_catalog.get(prov, [])
         model_options = [m["id"] for m in models]
-        # Build a display label with status badge
-        display = [
-            f"{mid} {'✅' if mid else ''}"
-            for mid in model_options
-        ]
-        # Remember the user‑selected model (fallback will be applied later)
-        sel = st.selectbox(
-            f"{prov} models",
-            options=model_options,
-            index=0 if model_options else -1,
-            key=f"selected_model_{prov}",
-            help="If the selected model becomes unavailable, the app will auto‑fallback.",
+        if not model_options:
+            st.selectbox(
+                f"{prov} model",
+                options=[cfg["default_model"]],
+                key=f"selected_model_{prov}",
+                help="Using default model (live list unavailable or key missing).",
+            )
+            continue
+        default_idx = (
+            model_options.index(cfg["default_model"])
+            if cfg["default_model"] in model_options
+            else 0
         )
-        # Store the selection for later use
-        st.session_state[f"selected_model_{prov}"] = sel
+        st.selectbox(
+            f"{prov} model",
+            options=model_options,
+            index=default_idx,
+            key=f"selected_model_{prov}",
+        )
 
     st.divider()
-    st.subheader("📁 File & Voice upload")
-    uploaded = st.file_uploader(
-        "Upload any file (PDF, txt, image, audio…) – audio will be transcribed",
-        type=None,
-        accept_multiple_files=False,
-        key="uploaded_file",
-    )
-    # Voice note recorder (requires streamlit‑webrtc)
-    try:
-        from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, ClientSettings
+    if st.button("🗑️ Clear Conversation"):
+        st.session_state.conversation = []
+        st.session_state.file_context = ""
+        st.rerun()
 
-        class AudioProcessor(AudioProcessorBase):
-            def __init__(self):
-                self.audio_frames = []
+# Pick best available active provider for each role
+active_providers = [p for p in PROVIDERS if get_key(p)]
 
-            def recv(self, frame):
-                self.audio_frames.append(frame.to_ndarray())
-                return frame
+def pick_provider(preferred: str) -> str:
+    if preferred in active_providers:
+        return preferred
+    return active_providers[0] if active_providers else preferred
 
-        webrtc_ctx = webrtc_streamer(
-            key="voice_note",
-            mode="client",
-            client_settings=ClientSettings(
-                media_stream_constraints={"audio": True, "video": False},
-                rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-            ),
-            audio_processor_factory=AudioProcessor,
-            async_processing=False,
-        )
-        voice_note_bytes = None
-        if webrtc_ctx.audio_receiver:
-            # Convert collected frames to a single WAV bytes object
-            import numpy as np
-            import wave
-            import io
-
-            frames =
+# Build dynamic agent definitions using live selected models
+AGENTS = {
+    "manager": {
+        "name": "🧭 Crew Manager",
+        "provider": pick_provider("Google AI Studio"),
+        "model": resolve_model(pick_provider("Google AI Studio"), ["gemini-3.5-flash-lite"]),
+        "temperature": 0.2,
+    },
+    "researcher": {
+        "name": "🔍 Web Researcher",
+        "provider": pick_provider("Groq"),
+        "model": resolve_model(pick_provider("Groq"), ["llama-3.3-70b-versatile"]),
+        "temperature": 0.3,
+    },
+    "builder": {
+        "name": "🛠️ Lead Builder & Coder",
+        "provider": pick_provider("NVIDIA NIM"),
+        "model": resolve_model(pick_provider("NVIDIA NIM"), ["deepseek-ai/deepseek-v4.1-flash"]),
+        "temperature": 0.3,
+    },
+    "reviewer": {
+        "name": "✅ Quality Reviewer",
