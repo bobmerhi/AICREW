@@ -39,7 +39,7 @@ def get_key(provider: str) -> str:
     typed = st.session_state.api_keys.get(provider, "").strip()
     if typed:
         return typed
-    secret_name = PROVIDERS[provider]["secret"]
+    secret_name = PROVIDERS.get(provider, {}).get("secret", "")
     try:
         if secret_name in st.secrets:
             return str(st.secrets[secret_name]).strip()
@@ -140,7 +140,8 @@ def stream_completion(agent: dict, messages: List[dict], placeholder) -> str:
             for chunk in stream:
                 if not chunk.choices:
                     continue
-                delta = chunk.choices[0].delta.content or ""
+                first_choice = next(iter(chunk.choices))
+                delta = first_choice.delta.content or ""
                 if delta:
                     text += delta
                     placeholder.markdown(text + "▌")
@@ -254,29 +255,33 @@ active_providers = [p for p in PROVIDERS if get_key(p)]
 def pick_provider(preferred: str) -> str:
     if preferred in active_providers:
         return preferred
-    return active_providers[0] if active_providers else preferred
+    return next(iter(active_providers), preferred)
 
 
-# Build dynamic agent definitions using live selected models
+mgr_prov = pick_provider("Google AI Studio")
+res_prov = pick_provider("Groq")
+bld_prov = pick_provider("NVIDIA NIM")
+rev_prov = pick_provider("OpenRouter")
+
 AGENTS = {
     "manager": {
         "name": "🧭 Crew Manager",
-        "provider": pick_provider("Google AI Studio"),
-        "model": resolve_model(pick_provider("Google AI Studio"), ["gemini-3.5-flash-lite"]),
+        "provider": mgr_prov,
+        "model": resolve_model(mgr_prov, ["gemini-3.5-flash-lite"]),
         "temperature": 0.2,
     },
     "researcher": {
         "name": "🔍 Web Researcher",
-        "provider": pick_provider("Groq"),
-        "model": resolve_model(pick_provider("Groq"), ["llama-3.3-70b-versatile"]),
+        "provider": res_prov,
+        "model": resolve_model(res_prov, ["llama-3.3-70b-versatile"]),
         "temperature": 0.3,
     },
     "builder": {
         "name": "🛠️ Lead Builder & Coder",
-        "provider": pick_provider("NVIDIA NIM"),
-        "model": resolve_model(pick_provider("NVIDIA NIM"), ["deepseek-ai/deepseek-v4.1-flash"]),
+        "provider": bld_prov,
+        "model": resolve_model(bld_prov, ["deepseek-ai/deepseek-v4.1-flash"]),
         "temperature": 0.3,
     },
     "reviewer": {
         "name": "✅ Quality Reviewer",
-        "provider": pick_provider("OpenRouter"),
+        "provider": rev_prov,
