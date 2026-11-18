@@ -32,8 +32,9 @@ def web_search(query: str) -> str:
 # 4. Build the Crew (cached so it loads fast)
 def run_crew(user_prompt: str) -> str:
     manager_llm = LLM(
-        model="gemini/gemini-3.5-flash-lite",
-        api_key=os.environ["GEMINI_API_KEY"]
+        model="openai/nvidia/nemotron-3-ultra-550b-a55b",
+        base_url="https://nvidia.com",
+        api_key=os.environ["NVIDIA_API_KEY"]
     )
     coder_llm = LLM(
         model="openai/deepseek-ai/deepseek-v4.1-flash",
