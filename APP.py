@@ -295,3 +295,321 @@ with col1:
         type=None,
     )
     if uploaded_file is not None:
+        # Read file content based on extension
+        try:
+            file_name = uploaded_file.name
+            file_ext = file_name.split('.')[-1].lower()
+            file_content = ""
+
+            if file_ext == 'txt':
+                file_content = uploaded_file.read().decode('utf-8', errors='ignore')
+            elif file_ext == 'csv':
+                file_content = uploaded_file.read().decode('utf-8', errors='ignore')
+            elif file_ext == 'json':
+                file_content = uploaded_file.read().decode('utf-8', errors='ignore')
+            elif file_ext == 'py':
+                file_content = uploaded_file.read().decode('utf-8', errors='ignore')
+            elif file_ext == 'md':
+                file_content = uploaded_file.read().decode('utf-8', errors='ignore')
+            elif file_ext == 'pdf':
+                # Note: Requires 'pypdf' or 'pdfplumber' installed
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(uploaded_file) as pdf:
+                        file_content = "\n".join(page.extract_text() or "" for page in pdf.pages)
+                except ImportError:
+                    st.error("Please install 'pdfplumber' to support PDF files: pip install pdfplumber")
+                    file_content = ""
+            else:
+                st.warning(f"Unsupported file type: {file_ext}. Please use TXT, CSV, JSON, PY, MD, or PDF.")
+
+            if file_content:
+                st.success(f"✅ File '{file_name}' loaded successfully.")
+                # Store in session_state for use in prompt
+                st.session_state['file_context'] = file_content
+                st.session_state['file_name'] = file_name
+        except Exception as e:
+            st.error(f"Error reading file: {str(e)}")
+
+# Voice Input Section (Optional - requires browser support)
+with col2:
+    st.subheader("🎤 Voice Input")
+    st.caption("Click the mic button to record your voice (requires browser permissions).")
+
+    # Streamlit doesn't have native voice input, so we provide a text box as fallback
+    # and a note about browser limitations. For true voice, you'd need a custom component.
+    voice_note = st.text_area(
+        "Or type your command here:",
+        placeholder="Type your command if voice input is not available...",
+        height=100,
+        key="voice_input_text"
+    )
+
+# --------------------------------------------------------------------------- #
+# 6. Chat Interface & Agent Orchestration
+# --------------------------------------------------------------------------- #
+
+# Initialize chat history in session state
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+# Display chat history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Input for user command
+user_input = st.chat_input("Enter your command or question...")
+
+if user_input:
+    # Add user message to history
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # Prepare context
+    file_context = st.session_state.get('file_context', "")
+    file_name = st.session_state.get('file_name', "")
+
+    # Build system prompt with context
+    system_prompt = "You are a helpful AI assistant. If file context is provided, use it to answer questions."
+    if file_context:
+        system_prompt += f"\n\nContext from file '{file_name}':\n{file_context[:5000]}"  # Limit context length
+
+    # Simulate agent orchestration
+    # In a real implementation, you'd route to different agents based on intent
+    # For now, we'll use a single LLM call with the active providers
+
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        full_response = ""
+
+        # Use the first active provider for simplicity
+        if active_providers:
+            provider = active_providers[0]
+
+            try:
+                # Call the LLM based on provider
+                if provider['name'] == 'OpenAI':
+                    import openai
+                    client = openai.OpenAI(api_key=provider['api_key'])
+                    response = client.chat.completions.create(
+                        model=provider['model'],
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_input}
+                        ],
+                        stream=True
+                    )
+                    for chunk in response:
+                        if chunk.choices[0].delta.content:
+                            full_response += chunk.choices[0].delta.content
+                            message_placeholder.markdown(full_response + "▌")
+
+                elif provider['name'] == 'Anthropic':
+                    import anthropic
+                    client = anthropic.Anthropic(api_key=provider['api_key'])
+                    message = client.messages.create(
+                        model=provider['model'],
+                        max_tokens=1024,
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": user_input}]
+                    )
+                    full_response = message.content[0].text
+                    message_placeholder.markdown(full_response)
+
+                elif provider['name'] == 'Google Gemini':
+                    import google.generativeai as genai
+                    genai.configure(api_key=provider['api_key'])
+                    model = genai.GenerativeModel(provider['model'])
+                    response = model.generate_content(user_input)
+                    full_response = response.text
+                    message_placeholder.markdown(full_response)
+
+                else:
+                    message_placeholder.warning(f"Provider '{provider['name']}' not implemented yet.")
+                    full_response = f"Provider '{provider['name']}' not implemented yet."
+
+            except Exception as e:
+                error_msg = f"Error calling {provider['name']}: {str(e)}"
+                message_placeholder.error(error_msg)
+                full_response = error_msg
+        else:
+            message_placeholder.warning("No active providers. Add an API key in the sidebar.")
+            full_response = "No active providers."
+
+        # Remove cursor
+        message_placeholder.markdown(full_response)
+
+    # Add assistant response to history
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    # --------------------------------------------------------------------------- #
+# 7. Agent Orchestration & Intent Routing
+# --------------------------------------------------------------------------- #
+
+def route_to_agent(user_input: str, file_context: str = ""):
+    """
+    Simple intent-based routing to different 'agents' (prompts/personas).
+    In a production system, you might use an LLM to classify intent first.
+    """
+    input_lower = user_input.lower()
+
+    # Define simple keyword-based routing for demonstration
+    if any(kw in input_lower for kw in ["code", "python", "debug", "function", "script"]):
+        return "coder_agent"
+    elif any(kw in input_lower for kw in ["write", "email", "report", "summary", "text"]):
+        return "writer_agent"
+    elif any(kw in input_lower for kw in ["analyze", "data", "csv", "json", "insight"]):
+        return "analyst_agent"
+    else:
+        return "general_agent"
+
+def get_agent_prompt(agent_name: str, file_context: str = ""):
+    """
+    Returns the system prompt for the specific agent.
+    """
+    base_context = f"\n\nContext from file: {file_context[:2000]}" if file_context else ""
+
+    prompts = {
+        "coder_agent": f"""
+        You are an expert Python Developer. 
+        - Provide clean, efficient, and well-commented code.
+        - Explain your logic briefly.
+        - If code is provided, suggest improvements or bug fixes.
+        {base_context}
+        """,
+        "writer_agent": f"""
+        You are a Professional Copywriter and Editor.
+        - Tone: Professional, clear, and engaging.
+        - Format output with proper headings and bullet points if appropriate.
+        - If asked to summarize, keep it concise.
+        {base_context}
+        """,
+        "analyst_agent": f"""
+        You are a Data Analyst.
+        - Interpret data from provided context.
+        - Provide insights, trends, and actionable recommendations.
+        - Use tables or bullet points for clarity.
+        {base_context}
+        """,
+        "general_agent": f"""
+        You are a helpful, friendly, and knowledgeable AI assistant.
+        - Answer questions accurately and concisely.
+        - If you don't know, say so and suggest how to find out.
+        {base_context}
+        """
+    }
+
+    return prompts.get(agent_name, prompts["general_agent"])
+
+# --------------------------------------------------------------------------- #
+# 8. Enhanced Chat Loop with Agent Routing
+# --------------------------------------------------------------------------- #
+
+# Re-initialize chat history if not present
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+# Display chat history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Input for user command
+user_input = st.chat_input("Enter your command or question...")
+
+if user_input:
+    # Add user message to history
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # Determine which agent to use
+    file_context = st.session_state.get('file_context', "")
+    agent_name = route_to_agent(user_input, file_context)
+    system_prompt = get_agent_prompt(agent_name, file_context)
+
+    # Show which agent is being used
+    st.info(f"🤖 Routing to: **{agent_name.replace('_agent', '').title()} Agent**")
+
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        full_response = ""
+
+        # Use the first active provider for simplicity
+        if active_providers:
+            provider = active_providers[0]
+
+            try:
+                # Call the LLM based on provider
+                if provider['name'] == 'OpenAI':
+                    import openai
+                    client = openai.OpenAI(api_key=provider['api_key'])
+                    response = client.chat.completions.create(
+                        model=provider['model'],
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_input}
+                        ],
+                        stream=True
+                    )
+                    for chunk in response:
+                        if chunk.choices[0].delta.content:
+                            full_response += chunk.choices[0].delta.content
+                            message_placeholder.markdown(full_response + "▌")
+
+                elif provider['name'] == 'Anthropic':
+                    import anthropic
+                    client = anthropic.Anthropic(api_key=provider['api_key'])
+                    message = client.messages.create(
+                        model=provider['model'],
+                        max_tokens=1024,
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": user_input}]
+                    )
+                    full_response = message.content[0].text
+                    message_placeholder.markdown(full_response)
+
+                elif provider['name'] == 'Google Gemini':
+                    import google.generativeai as genai
+                    genai.configure(api_key=provider['api_key'])
+                    model = genai.GenerativeModel(provider['model'])
+                    response = model.generate_content(user_input)
+                    full_response = response.text
+                    message_placeholder.markdown(full_response)
+
+                else:
+                    message_placeholder.warning(f"Provider '{provider['name']}' not implemented yet.")
+                    full_response = f"Provider '{provider['name']}' not implemented yet."
+
+            except Exception as e:
+                error_msg = f"Error calling {provider['name']}: {str(e)}"
+                message_placeholder.error(error_msg)
+                full_response = error_msg
+        else:
+            message_placeholder.warning("No active providers. Add an API key in the sidebar.")
+            full_response = "No active providers."
+
+        # Remove cursor and finalize
+        message_placeholder.markdown(full_response)
+
+    # Add assistant response to history
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+# --------------------------------------------------------------------------- #
+# 9. Session Management & UI Footer
+# --------------------------------------------------------------------------- #
+
+def clear_session():
+    """Clears the chat history and resets the session state."""
+    st.session_state.messages = []
+    st.session_state.full_response = ""  # Reset any in-progress response state
+    st.rerun()
+
+# Display a button to clear the history
+if st.button("🧹 Clear Chat History"):
+    clear_session()
+
+# Optional: Display a small footer with app info
+st.markdown("---")
+st.caption("Built with Streamlit & LangChain | [GitHub](https://github.com/your-repo)")
